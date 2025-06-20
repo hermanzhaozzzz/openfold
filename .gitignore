@@ -4,7 +4,7 @@ __pycache__/
 *.egg-info
 build
 dist
-
+**/.ipynb_checkpoints/
 # files from script downloads
 data
 openfold/resources/
