@@ -19,7 +19,7 @@ from openfold.config import model_config
 from openfold.data import data_pipeline, feature_pipeline, templates
 from openfold.utils.script_utils import load_models_from_command_line, run_model
 
-lm = LoggerManager(mod_name="AF2indicator", log_level="DEBUG")
+lm = LoggerManager(mod_name="AF2indicator", log_level="WARNING")
 
 
 def hashed_random_string():
@@ -42,10 +42,10 @@ def strip_gaps_from_a3m(a3m_path: str, output_fasta: str):
 
 def remove_prefix_files_and_dirs(q_fa: str):
     lm.set_names(func_name="remove_prefix_files_and_dirs")
-    prefix = q_fa.replace('.fa', '')
+    prefix = q_fa.replace(".fa", "")
     # 匹配所有以该 prefix 开头的路径（文件或文件夹）
     targets = glob(f"{prefix}*")
-    
+
     for path in targets:
         if os.path.isfile(path) or os.path.islink(path):
             os.remove(path)
@@ -57,7 +57,8 @@ def remove_prefix_files_and_dirs(q_fa: str):
     for path in targets:
         if os.path.isfile(path) or os.path.islink(path):
             os.remove(path)
-            
+
+
 class MSAGenerator:
     def __init__(
         self,
@@ -287,6 +288,7 @@ class OpenFoldPredictor:
         mmseqs_threads: int = 4,
         kalign_binary_path: str = "kalign",
         keep_temps: bool = False,  # for debug
+        use_deepspeed_evoformer_attention: bool = False,
     ):
         lm.set_names(cls_name="OpenFoldPredictor", func_name="__init__")
         # ------------------------------------------------------------------->>>>>>>>>>
@@ -295,7 +297,7 @@ class OpenFoldPredictor:
         self.config = model_config(
             config_preset,
             long_sequence_inference=False,
-            use_deepspeed_evoformer_attention=True,  # EGFP test, False 22.48 s / True 13.82 s
+            use_deepspeed_evoformer_attention=use_deepspeed_evoformer_attention,  # EGFP test, False 22.48 s / True 13.82 s
         )
         # ------------------------------------------------------------------->>>>>>>>>>
         # Template and alignment processor
@@ -402,7 +404,7 @@ OpenFold: {openfold_checkpoint_path}
         }
         lm.logger.debug(f"predict results: {res_dict}")
         try:
-            shutil.rmtree(os.path.basename(self._a3m_path))            
+            shutil.rmtree(os.path.basename(self._a3m_path))
         except:
             pass
         return res_dict
