@@ -1,11 +1,14 @@
 import atexit
+import hashlib
+import shutil
 import os
+import random
 import re
 import subprocess
 import tempfile
-import uuid
+import time
 from typing import Dict, Optional
-
+from glob import glob
 import torch
 from Bio import SeqIO
 from Bio.Seq import Seq
@@ -19,6 +22,12 @@ from openfold.utils.script_utils import load_models_from_command_line, run_model
 lm = LoggerManager(mod_name="AF2indicator", log_level="DEBUG")
 
 
+def hashed_random_string():
+    timestamp = str(time.time()).encode("utf-8")
+    hashed = hashlib.sha256(timestamp).hexdigest()
+    return hashed[:12]
+
+
 def strip_gaps_from_a3m(a3m_path: str, output_fasta: str):
     lm.set_names(func_name="strip_gaps_from_a3m")
     lm.logger.debug(f"get a3m_path: {a3m_path}")
@@ -30,11 +39,25 @@ def strip_gaps_from_a3m(a3m_path: str, output_fasta: str):
     with open(output_fasta, "w") as f:
         SeqIO.write(records, f, "fasta")
 
-    # pass
-    # with open("debug_01.strip_gaps_from_a3m.fa", "w") as f:
-    #     SeqIO.write(records, f, "fasta")
 
-
+def remove_prefix_files_and_dirs(q_fa: str):
+    lm.set_names(func_name="remove_prefix_files_and_dirs")
+    prefix = q_fa.replace('.fa', '')
+    # 匹配所有以该 prefix 开头的路径（文件或文件夹）
+    targets = glob(f"{prefix}*")
+    
+    for path in targets:
+        if os.path.isfile(path) or os.path.islink(path):
+            os.remove(path)
+            lm.logger.debug(f"Deleted file: {path}")
+        elif os.path.isdir(path):
+            shutil.rmtree(path)
+            lm.logger.debug(f"Deleted directory: {path}")
+    targets = glob("/dev/shm/__KMP_REGISTERED_LIB_*")
+    for path in targets:
+        if os.path.isfile(path) or os.path.islink(path):
+            os.remove(path)
+            
 class MSAGenerator:
     def __init__(
         self,
@@ -44,7 +67,7 @@ class MSAGenerator:
         keep_temps: bool = False,
     ):
         lm.set_names(cls_name="MSAGenerator", func_name="__init__")
-        self.session_id = f"mmseqs_session_{uuid.uuid4().hex}"
+        self.session_id = f"mmseqs_session_{hashed_random_string()}"
         self.tmp_root = os.path.join(mmseqs_tmp_dir, self.session_id)
         lm.logger.debug(f"make dir: {self.tmp_root}")
         os.makedirs(self.tmp_root, exist_ok=True)
@@ -56,9 +79,10 @@ class MSAGenerator:
         lm.logger.debug(f"a3m gaps were removed and save to {self.hits_input_fasta}")
         # 构建 hits_db（indexed db 用于 mmseqs search）
         self.hits_db = os.path.join(self.tmp_root, "hits_db")
-        lm.logger.debug(f"use {mmseqs_threads} for mmseqs2 protocols")
+        lm.logger.debug(f"use {mmseqs_threads} threads for mmseqs2 protocols")
         self.threads = mmseqs_threads
         self._build_hits_db()
+        self._output_a3m_path = None
 
         lm.logger.debug(f"keep_temps = {keep_temps}")
         if not keep_temps:
@@ -70,7 +94,7 @@ class MSAGenerator:
     def _build_hits_db(self):
         lm.set_names(cls_name="MSAGenerator", func_name="_build_hits_db")
         if not os.path.exists(self.hits_db + ".dbtype"):
-            lm.logger.info(
+            lm.logger.debug(
                 f"Building MMseqs2 DB at {self.hits_db} from {self.hits_input_fasta}..."
             )
             subprocess.run(
@@ -84,7 +108,7 @@ class MSAGenerator:
                 f"Found existing MMseqs2 DB at {self.hits_db}. Skipping rebuild."
             )
 
-    def _safe_rm_mmseqs_db(self, base_path: str):
+    def _safe_rm_mmseqs_db(self, base_path):
         """删除已有的 MMseqs DB 文件（以避免 search 报错）"""
         lm.set_names(cls_name="MSAGenerator", func_name="_safe_rm_mmseqs_db")
         for ext in [".dbtype", ".index", ".lookup", ".db", ".h", ".src"]:
@@ -92,13 +116,14 @@ class MSAGenerator:
             if os.path.exists(path):
                 lm.logger.debug(f"remove temp mmseqs db file {path}")
                 os.remove(path)
+        if self._output_a3m_path:
+            lm.logger.debug(f"remove temp old a3m file {self._output_a3m_path}")
+            os.remove(self._output_a3m_path)
 
     def cleanup(self):
         lm.set_names(cls_name="MSAGenerator", func_name="cleanup")
         if os.path.exists(self.tmp_root):
             try:
-                import shutil
-
                 lm.logger.debug(f"remove dir {self.tmp_root}")
                 shutil.rmtree(self.tmp_root)
             except Exception as e:
@@ -130,12 +155,12 @@ class MSAGenerator:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-
+        mmseqs_tmp = q_fa.replace(".fa", "_tmps")
         # 搜索
         lm.logger.debug(f"""run mmseqs search with a very sensitive strategy: 
 mmseqs search {q_db} \\
     {self.hits_db} \\
-    {local_tmp} \\
+    {mmseqs_tmp} \\
     --threads {self.threads} \\
     -s 7.5 --max-seqs 1000
 """)
@@ -146,7 +171,7 @@ mmseqs search {q_db} \\
                 q_db,
                 self.hits_db,
                 res_db,
-                local_tmp,
+                mmseqs_tmp,
                 "--threads",
                 str(self.threads),
                 "-s",
@@ -243,6 +268,7 @@ mmseqs convertalis {q_db} \\
             for rec in records:
                 f.write(f">{rec.id}\n{rec.seq}\n")
             # exit()
+        remove_prefix_files_and_dirs(q_fa)
         return output_a3m_path
 
 
@@ -321,26 +347,27 @@ OpenFold: {openfold_checkpoint_path}
         self.msa_generator = MSAGenerator(
             a3m_path, mmseqs_tmp_dir, mmseqs_threads, keep_temps
         )
+        self._seqtag = None
+        self._a3m_path = None
 
-    def update_msa(
-        self, seq: str, tag: str = "query", alignment_dir: Optional[str] = None
-    ) -> str:
+    def update_msa(self, seq: str, alignment_dir: Optional[str] = None) -> str:
         lm.set_names(cls_name="OpenFoldPredictor", func_name="update_msa")
-        lm.logger.debug(f"MSA updating for {tag}")
+        self._seqtag = f"{hashed_random_string()}_len{len(seq)}"
+        lm.logger.debug(f"MSA updating for {self._seqtag}")
         if alignment_dir is None:
             alignment_dir = os.path.join(self.msa_generator.tmp_root, "alignments")
 
-        os.makedirs(os.path.join(alignment_dir, tag), exist_ok=True)
-        a3m_path = os.path.join(alignment_dir, tag, f"{tag}.a3m")
-        self.msa_generator.generate_a3m(tag, seq, a3m_path)
+        os.makedirs(os.path.join(alignment_dir, self._seqtag), exist_ok=True)
+        a3m_path = os.path.join(alignment_dir, self._seqtag, f"{self._seqtag}.a3m")
+        self.msa_generator.generate_a3m(self._seqtag, seq, a3m_path)
         return a3m_path
 
-    def generate_feature_dict(self, tag, seq, alignment_dir):
+    def generate_feature_dict(self, seq, alignment_dir):
         lm.set_names(cls_name="OpenFoldPredictor", func_name="generate_feature_dict")
-        fasta_str = f">{tag}\n{seq}\n"
+        fasta_str = f">{self._seqtag}\n{seq}\n"
         tmp_path = os.path.join(self.msa_generator.tmp_root, "tmpfa")
         os.makedirs(tmp_path, exist_ok=True)
-        tmpfa = os.path.join(tmp_path, uuid.uuid4().hex + ".fa")
+        tmpfa = os.path.join(tmp_path, hashed_random_string() + ".fa")
 
         with open(tmpfa, "wt") as f:
             lm.logger.debug(
@@ -350,15 +377,15 @@ OpenFold: {openfold_checkpoint_path}
 
         feature_dict = self.data_processor.process_fasta(
             fasta_path=tmpfa,
-            alignment_dir=os.path.join(alignment_dir, tag),
+            alignment_dir=os.path.join(alignment_dir, self._seqtag),
             seqemb_mode=False,
         )
         return feature_dict
 
-    def predict(self, seq: str, tag: str = "query") -> Dict:
+    def predict(self, seq: str) -> Dict:
         lm.set_names(cls_name="OpenFoldPredictor", func_name="predict")
         alignment_dir = os.path.join(self.msa_generator.tmp_root, "alignments")
-        feature_dict = self.generate_feature_dict(tag, seq, alignment_dir)
+        feature_dict = self.generate_feature_dict(seq, alignment_dir)
         processed = self.feature_processor.process_features(
             feature_dict, mode="predict", is_multimer=False
         )
@@ -367,13 +394,17 @@ OpenFold: {openfold_checkpoint_path}
         }
 
         with tempfile.TemporaryDirectory() as tmp_output:
-            out = run_model(self.model, processed, tag, tmp_output)
+            out = run_model(self.model, processed, self._seqtag, tmp_output)
         res_dict = {
             "pLDDT_resi": out["plddt"].tolist(),
             "pLDDT": float(out["plddt"].mean().item()),
             "pTM_score": out.get("ptm_score", None),
         }
         lm.logger.debug(f"predict results: {res_dict}")
+        try:
+            shutil.rmtree(os.path.basename(self._a3m_path))            
+        except:
+            pass
         return res_dict
 
 
@@ -391,7 +422,7 @@ if __name__ == "__main__":
     predictor = OpenFoldPredictor(
         a3m_path=a3m_path,
         device="cuda:0",
-        keep_temps=True,  # for debug
+        keep_temps=False,  # for debug
     )
     print(f"Model loaded in {time.time() - start_time:.2f} seconds")
 
@@ -410,17 +441,14 @@ if __name__ == "__main__":
             aa for idx, aa in enumerate(test_seq) if idx not in cut_positions
         )
 
-        # test_seq = test_seq[]  # 每轮裁掉一个氨基酸
-        tag = f"cut_{i}_len{len(test_seq)}"
-        print(f"\n--- Prediction {i + 1} ({tag}) ---")
         print(f"Test sequence length: {len(test_seq)}")
 
         start_time = time.time()
         # ✅ 显式调用 MSA 更新
-        predictor.update_msa(test_seq, tag=tag)
+        predictor.update_msa(test_seq)
 
         # ✅ 再调用 predict
-        result = predictor.predict(test_seq, tag=tag)
+        result = predictor.predict(test_seq)
         elapsed = time.time() - start_time
 
         print(f"Time taken: {elapsed:.2f} seconds")
