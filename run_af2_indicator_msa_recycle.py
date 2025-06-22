@@ -417,7 +417,7 @@ if __name__ == "__main__":
     from Bio import SeqIO
 
     # 输入路径
-    a3m_path = "/lustre2/cqyi/hnzhao/projects/2024_ProEvo_model/ProEvaluator/results/EGFP_20250330_meanpooling/structure/ref/ref.a3m"
+    a3m_path = "/lustre2/cqyi/hnzhao/projects/2024_ProEvo_model/ProEvaluator/datasets/ref_a3ms/EGFP.a3m"
     # ------------------------------------------------------------------->>>>>>>>>>
     print(f"\n--- Loading Model ---")
     start_time = time.time()
